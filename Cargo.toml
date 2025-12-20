@@ -1,0 +1,67 @@
+cargo-features = ["profile-rustflags"]
+
+[package]
+name = "sefi"
+version = "0.1.0"
+authors = ["zenofile", "zenofile <zenofile-sf6@unsha.re>"]
+categories = ["command-line-utilities"]
+description = "Git filter driver"
+edition = "2024"
+keywords = ["git", "filter", "smudge", "secrets" ]
+license = "GPL-3.0-or-later"
+publish = false
+readme = "README.md"
+repository = "https://github.com/zenofile/sefi.git"
+rust-version = "1.94"
+
+[dependencies]
+aho-corasick = "1.1"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "s"
+overflow-checks = false
+panic = "abort"
+strip = "symbols"
+
+[profile.release-native]
+inherits = "release"
+rustflags = ["-C", "target-cpu=native"]
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+rustflags = ["-C", "target-cpu=native", "-C", "force-frame-pointers=yes"]
+
+[lints]
+
+[lints.rust]
+missing_copy_implementations = "warn"
+missing_debug_implementations = "allow"
+missing_docs = "allow"
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+cargo = { level = "warn", priority = 0 }
+items_after_statements = { level = "allow", priority = 1 }
+multiple_crate_versions = { level = "allow", priority = 1 }
+nursery = { level = "warn", priority = 0 }
+pedantic = { level = "warn", priority = 0 }
+uninlined_format_args = { level = "allow", priority = 1 }
+
+[dev-dependencies]
+assert_cmd = "2.1"
+memfd = "0.6"
+predicates = "3.1"

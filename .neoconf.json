@@ -1,0 +1,16 @@
+{
+  "lspconfig": {
+    "rust_analyzer": {
+      "rust-analyzer.cargo.features": "all",
+      "rust-analyzer.procMacro.ignored": {
+        "serde_derive": [
+          "Serialize",
+          "Deserialize"
+        ]
+      },
+      "rust-analyzer.diagnostics.disabled": [
+        "proc-macro-disabled"
+      ]
+    }
+  }
+}
