@@ -1,10 +1,12 @@
-#![feature(likely_unlikely)]
+#![feature(likely_unlikely, read_buf, maybe_uninit_array_assume_init)]
 
 use std::{
     fs,
     hint::unlikely,
     io::{self, Read, Write},
+    mem::MaybeUninit,
     path::PathBuf,
+    ptr, slice,
 };
 
 use aho_corasick::{AhoCorasick, MatchKind};
@@ -111,16 +113,16 @@ impl<W: Write> StreamReplacer<'_, W> {
 
         if last_idx < safe_len {
             self.writer.write_all(&chunk[last_idx..limit])?;
-            Ok(limit)
-        } else {
-            Ok(last_idx)
+            return Ok(limit);
         }
+
+        Ok(last_idx)
     }
 }
 
 #[allow(clippy::significant_drop_tightening)]
 fn main() -> Result<()> {
-    const BUF_SIZE_ALIGNED: usize = 1024 << 4; // 16 KiB
+    const BUF_SIZE: usize = 1024 << 4; // 16 KiB
 
     let cli = Cli::parse();
 
@@ -137,13 +139,13 @@ fn main() -> Result<()> {
             }
         };
 
-        let use_ansi = io::IsTerminal::is_terminal(&std::io::stdout());
+        let use_ansi = io::IsTerminal::is_terminal(&io::stdout());
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env()
                     .add_directive(level_filter.into()),
             )
-            .with_writer(std::io::stderr)
+            .with_writer(io::stderr)
             .with_ansi(use_ansi)
             .init();
     }
@@ -189,16 +191,13 @@ fn main() -> Result<()> {
     // Calculate buffer parameters *before* locking
     let max_pattern_len = patterns.iter().map(String::len).max().unwrap_or(0);
 
-    if max_pattern_len >= BUF_SIZE_ALIGNED {
+    if max_pattern_len >= BUF_SIZE {
         anyhow::bail!(
             "Pattern length ({}) exceeds buffer size ({})",
             max_pattern_len,
-            BUF_SIZE_ALIGNED
+            BUF_SIZE
         );
     }
-
-    let mut buffer = [0u8; BUF_SIZE_ALIGNED];
-    let mut total = 0;
 
     // EXPLICITLY ALLOW HOLDING THE LOCK
     // We intentionally hold the lock for the entire duration of the loop to
@@ -216,20 +215,57 @@ fn main() -> Result<()> {
         path: cli.file,
     };
 
+    let mut total = 0;
+
+    let mut buffer: [MaybeUninit<u8>; _] = [MaybeUninit::uninit(); BUF_SIZE];
+    let bufptr = buffer.as_mut_ptr().cast::<u8>();
+
     loop {
-        // Fill the buffer
-        let bytes = stdin.read(&mut buffer[total..])?;
+        // SAFETY:
+        // - `bufptr` is derived from `buffer`, so it is valid and non-null.
+        // - `total` is tracked and ensures `add(total)` is within the
+        //   allocation.
+        // - `BUF_SIZE - total` ensures the slice length does not exceed the
+        //   buffer end.
+        let slice_to_write = unsafe {
+            std::slice::from_raw_parts_mut(
+                buffer.as_mut_ptr().add(total).cast::<u8>(),
+                BUF_SIZE - total,
+            )
+        };
+        let bytes = stdin.read(slice_to_write)?;
+
         if unlikely(bytes == 0) {
             // EOF: Process remainder
-            replacer.process(&buffer[..total], true)?;
+            // SAFETY: `total` represents the sum of the preserved tail and valid
+            // bytes tracked during the loop, guaranteeing `0..total` is
+            // fully initialized.
+            let valid_slice = unsafe { slice::from_raw_parts(bufptr, total) };
+            replacer.process(valid_slice, true)?;
             break;
         }
+
         total += bytes;
 
-        let processed = replacer.process(&buffer[..total], false)?;
+        // SAFETY: `total` has been updated to include the newly read `bytes`.
+        // The range `0..total` contains valid, initialized data from previous
+        // iterations and the recent read.
+        let valid_slice = unsafe { slice::from_raw_parts(bufptr, total) };
+        let processed = replacer.process(valid_slice, false)?;
+
+        // SAFETY:
+        // - `processed` is returned by `process`, which guarantees it is <=
+        //   `total`.
+        // - `ptr::copy` handles overlapping memory regions safely (memmove)
+        unsafe {
+            ptr::copy(
+                bufptr.add(processed), // src
+                bufptr,                // dst
+                total - processed,     // count
+            );
+        }
 
         // Move remaining tail to start
-        buffer.copy_within(processed..total, 0);
         total -= processed;
     }
 

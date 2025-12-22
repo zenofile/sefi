@@ -97,7 +97,7 @@ fn test_smudge_mode_restores_secrets_from_placeholders() {
 }
 
 #[test]
-fn test_multiple_entry() {
+fn test_multiple_entry_buffer_straddle() {
     let (_fd, config_path) = create_config(
         r#"
         [[entry]]
@@ -110,8 +110,6 @@ fn test_multiple_entry() {
     "#,
     );
 
-    // This previously failed because "password123" straddled the buffer
-    // boundary
     let input = "Key: 12345-abcde, Pass: password123";
     let expected = "Key: <API_KEY>, Pass: <DB_PASS>";
 

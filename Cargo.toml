@@ -2,7 +2,7 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "sefi"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["zenofile", "zenofile <zenofile-sf6@unsha.re>"]
 categories = ["command-line-utilities"]
 description = "Git filter driver"
