@@ -2,12 +2,12 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "sefi"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["zenofile", "zenofile <zenofile-sf6@unsha.re>"]
 categories = ["command-line-utilities"]
 description = "Git filter driver"
 edition = "2024"
-keywords = ["git", "filter", "smudge", "secrets" ]
+keywords = ["git", "filter", "smudge", "secrets"]
 license = "GPL-3.0-or-later"
 publish = false
 readme = "README.md"
@@ -17,11 +17,17 @@ rust-version = "1.94"
 [dependencies]
 aho-corasick = "1.1"
 anyhow = "1.0"
+base64 = { version = "0.22", optional = true }
+hex = { version = "0.4", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["encoding"]
+encoding = ["dep:base64", "dep:hex"]
 
 [profile.dev]
 incremental = true
@@ -60,8 +66,12 @@ multiple_crate_versions = { level = "allow", priority = 1 }
 nursery = { level = "warn", priority = 0 }
 pedantic = { level = "warn", priority = 0 }
 uninlined_format_args = { level = "allow", priority = 1 }
+inline_always = { level = "allow", priority = 1 }
 
 [dev-dependencies]
 assert_cmd = "2.1"
 memfd = "0.6"
 predicates = "3.1"
+
+[[bench]]
+name = "stream_benchmark"

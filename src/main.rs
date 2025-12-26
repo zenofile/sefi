@@ -1,5 +1,4 @@
 #![feature(likely_unlikely, read_buf, maybe_uninit_array_assume_init)]
-
 use std::{
     fs,
     hint::unlikely,
@@ -50,73 +49,155 @@ struct Config {
 
 #[derive(Deserialize)]
 struct Entry {
+    active: Option<bool>,
+    boundary: Option<bool>,
+    encoding: Option<String>,
     placeholder: String,
     secret: String,
 }
 
 struct StreamReplacer<'a, W> {
+    /// Compiled search automaton
     ac: &'a AhoCorasick,
+    /// Patterns to find
     patterns: &'a [String],
+    /// Strings to substitute
     replacements: &'a [String],
+    /// Word boundary flags
+    boundaries: &'a [bool],
+    /// Output data sink
     writer: W,
+    /// Max pattern length
     overlap: usize,
-    pub count: usize,
-    pub path: Option<PathBuf>,
+    /// Total replacement count
+    count: usize,
+    /// File path for stderr logs
+    path: Option<PathBuf>,
+    /// Previous chunk's tail
+    last_byte: Option<u8>,
 }
 
-// Try to manually implement AhoCorasick::stream_replace_all_with
+/// Helper enum
+enum Action {
+    /// Pattern index to use for replacement
+    Replace(usize),
+    /// Found a match, but boundary check failed; print original
+    Skip,
+    /// Match straddles the buffer end; wait for next chunk
+    Defer,
+}
+
 impl<W: Write> StreamReplacer<'_, W> {
     fn process(&mut self, chunk: &[u8], is_eof: bool) -> Result<usize> {
         let mut last_idx = 0;
 
-        // Calculate safe limit based on stored overlap overlap is length of
-        // longest secret - "password123" is 11 chars, so overlap is 10.
+        // Calculate safe limit based on overlap
         let safe_len = if is_eof {
             chunk.len()
         } else {
             chunk.len().saturating_sub(self.overlap)
         };
 
-        // We initially plan to process up to safe_len, but if we find a match
-        // that straddles the boundary, we must stop *before* that match starts
         let mut limit = safe_len;
 
         for mat in self.ac.find_iter(chunk) {
+            // Safety Check: If match goes beyond safe area, stop immediately
             if unlikely(mat.end() > safe_len) {
                 limit = mat.start();
                 break;
             }
 
-            // Write content before match
-            self.writer.write_all(&chunk[last_idx..mat.start()])?;
-
-            // Replacement
-            let pattern_idx = mat.pattern().as_usize();
-            let matched_text = &self.patterns[pattern_idx];
-            let replacement_text = &self.replacements[pattern_idx];
-
-            // Log with filename if available
-            if let Some(path) = &self.path {
-                info!(
-                    "File: {:?} | Replacing '{}' -> '{}'",
-                    path, matched_text, replacement_text
-                );
-            } else {
-                info!("Replacing '{}' -> '{}'", matched_text, replacement_text);
+            // Decision Logic: Delegate complexity to a helper
+            match self.check_boundary(chunk, &mat, is_eof) {
+                Action::Defer => {
+                    limit = mat.start();
+                    break;
+                }
+                Action::Skip => {
+                    // Boundary check failed: write everything (prefix + original match)
+                    self.writer.write_all(&chunk[last_idx..mat.end()])?;
+                }
+                Action::Replace(idx) => {
+                    // Boundary check passed: write prefix + replacement
+                    self.writer.write_all(&chunk[last_idx..mat.start()])?;
+                    self.perform_replacement(idx)?;
+                }
             }
-
-            self.writer.write_all(replacement_text.as_bytes())?;
-            self.count += 1;
 
             last_idx = mat.end();
         }
 
-        if last_idx < safe_len {
+        // Write remaining tail
+        if last_idx < limit {
             self.writer.write_all(&chunk[last_idx..limit])?;
-            return Ok(limit);
         }
 
-        Ok(last_idx)
+        // Save state for next chunk
+        if limit > 0 {
+            self.last_byte = Some(chunk[limit - 1]);
+        }
+
+        Ok(limit)
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn check_boundary(&self, chunk: &[u8], mat: &aho_corasick::Match, is_eof: bool) -> Action {
+        let p_idx = mat.pattern().as_usize();
+
+        // If this pattern doesn't require boundaries, we always replace
+        if !self.boundaries[p_idx] {
+            return Action::Replace(p_idx);
+        }
+
+        // Check Left Boundary
+        let left_is_word = if mat.start() > 0 {
+            Self::is_word_char(chunk[mat.start() - 1])
+        } else {
+            // Check the last byte from the previous chunk
+            self.last_byte.is_some_and(Self::is_word_char)
+        };
+
+        if left_is_word {
+            return Action::Skip;
+        }
+
+        // Check Right Boundary
+        if mat.end() == chunk.len() {
+            if !is_eof {
+                // We ran out of data to check the right boundary -> Defer
+                return Action::Defer;
+            }
+            // If EOF, the end of the stream is implicitly a non-word
+            // char
+        } else if Self::is_word_char(chunk[mat.end()]) {
+            return Action::Skip;
+        }
+
+        Action::Replace(p_idx)
+    }
+
+    fn perform_replacement(&mut self, idx: usize) -> Result<()> {
+        let matched = &self.patterns[idx];
+        let replacement = &self.replacements[idx];
+
+        if let Some(path) = &self.path {
+            info!(
+                "File: {:?} | Replacing '{}' -> '{}'",
+                path, matched, replacement
+            );
+        } else {
+            info!("Replacing '{}' -> '{}'", matched, replacement);
+        }
+
+        self.writer.write_all(replacement.as_bytes())?;
+        self.count += 1;
+        Ok(())
+    }
+
+    #[inline(always)]
+    const fn is_word_char(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
     }
 }
 
@@ -169,15 +250,25 @@ fn main() -> Result<()> {
 
     let mut patterns = Vec::with_capacity(config.entry.len());
     let mut replacements = Vec::with_capacity(config.entry.len());
+    let mut boundaries = Vec::with_capacity(config.entry.len());
 
     for entry in config.entry {
+        if !entry.active.unwrap_or(true) {
+            continue;
+        }
+
+        let processed_secret = transform_secret(&entry.secret, entry.encoding.as_deref())
+            .context("Failed to encode secret")?;
+
+        boundaries.push(entry.boundary.unwrap_or(false));
+
         match cli.mode {
             Mode::Smudge => {
                 patterns.push(entry.placeholder);
-                replacements.push(entry.secret);
+                replacements.push(processed_secret);
             }
             Mode::Clean => {
-                patterns.push(entry.secret);
+                patterns.push(processed_secret);
                 replacements.push(entry.placeholder);
             }
         }
@@ -209,10 +300,12 @@ fn main() -> Result<()> {
         ac: &ac,
         patterns: &patterns,
         replacements: &replacements,
+        boundaries: &boundaries,
         writer: stdout,
         overlap: max_pattern_len.saturating_sub(1),
         count: 0,
         path: cli.file,
+        last_byte: None,
     };
 
     let mut total = 0;
@@ -276,4 +369,27 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn transform_secret(secret: &str, encoding: Option<&str>) -> Result<String> {
+    match encoding.unwrap_or("none") {
+        "none" => Ok(secret.to_string()),
+
+        #[cfg(feature = "encoding")]
+        "base64" => {
+            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+            Ok(BASE64.encode(secret))
+        }
+
+        #[cfg(feature = "encoding")]
+        "hex" => Ok(hex::encode(secret)),
+
+        #[cfg(not(feature = "encoding"))]
+        "base64" | "hex" => anyhow::bail!(
+            "Encoding '{}' requires the 'encoding' feature to be enabled during compilation",
+            encoding.unwrap()
+        ),
+
+        other => anyhow::bail!("Unknown encoding: {}", other),
+    }
 }

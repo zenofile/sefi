@@ -280,3 +280,271 @@ fn test_pipe_clean_to_smudge_streaming() {
     let output_str = String::from_utf8(smudge_output.stdout).expect("Output was not valid UTF-8");
     assert_eq!(output_str, original_input);
 }
+
+#[test]
+fn test_boundary_enabled_ignores_partial_matches() {
+    let (_fd, config_path) = create_config(
+        r#"
+        [[entry]]
+        placeholder = "REDACTED"
+        secret = "secret"
+        boundary = true
+        "#,
+    );
+
+    // "secret" -> Should replace (exact match)
+    // "secretary" -> Should NOT replace (right boundary)
+    // "topsecret" -> Should NOT replace (left boundary)
+    // "my_secret_key" -> Should NOT replace (underscores)
+    // "secret!" -> Should replace (punctuation is not a word char)
+    let input = "Found secret. Not secretary. Not topsecret. Not my_secret_key. Yes secret!";
+    let expected = "Found REDACTED. Not secretary. Not topsecret. Not my_secret_key. Yes REDACTED!";
+
+    filter_cmd()
+        .arg("clean")
+        .arg("--config")
+        .arg(&config_path)
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(diff(expected));
+}
+
+#[test]
+fn test_inactive_entry_is_ignored() {
+    let (_fd, config_path) = create_config(
+        r#"
+        [[entry]]
+        placeholder = "REDACTED"
+        secret = "secret_value"
+        active = false
+        "#,
+    );
+
+    let input = "This contains secret_value that should NOT be hidden.";
+
+    // Expect input to pass through unchanged
+    filter_cmd()
+        .arg("clean")
+        .arg("--config")
+        .arg(&config_path)
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(diff(input));
+}
+
+#[test]
+fn test_boundary_match_at_chunk_end() {
+    let (_fd, config_path) = create_config(
+        r#"
+        [[entry]]
+        placeholder = "KEY"
+        secret = "12345"
+        boundary = true
+        "#,
+    );
+
+    // We can't easily force the internal chunk size (16KB) from integration
+    // tests, but we can ensure normal "end of stream" boundary checks
+    // work. If the tool panicked or duplicated data at EOF, this would
+    // fail.
+    let input = "prefix 12345";
+    let expected = "prefix KEY";
+
+    filter_cmd()
+        .arg("clean")
+        .arg("--config")
+        .arg(&config_path)
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(diff(expected));
+}
+
+#[test]
+fn test_boundary_disabled_replaces_partial_matches_aggressively() {
+    let (_fd, config_path) = create_config(
+        r#"
+        [[entry]]
+        placeholder = "REDACTED"
+        secret = "secret"
+        # boundary defaults to false
+        "#,
+    );
+
+    let input = "secretary topsecret";
+    let expected = "REDACTEDary topREDACTED";
+
+    filter_cmd()
+        .arg("clean")
+        .arg("--config")
+        .arg(&config_path)
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(diff(expected));
+}
+
+#[test]
+#[cfg(not(feature = "encoding"))]
+fn test_encoding_fails_gracefully_without_feature() {
+    let (_fd, config_path) = create_config(
+        r#"
+        [[entry]]
+        placeholder = "REDACTED"
+        secret = "secret"
+        encoding = "base64"
+        "#,
+    );
+
+    // Expect failure because the binary was built without base64 support
+    filter_cmd()
+        .arg("clean")
+        .arg("--config")
+        .arg(&config_path)
+        .write_stdin("data")
+        .assert()
+        .failure()
+        .stderr(contains("requires the 'encoding' feature"));
+}
+
+#[cfg(feature = "encoding")]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn test_encoding_base64_clean_and_smudge() {
+        // "test" in base64 is "dGVzdA=="
+        let (_fd, config_path) = create_config(
+            r#"
+        [[entry]]
+        placeholder = "REDACTED"
+        secret = "test"
+        encoding = "base64"
+        "#,
+        );
+
+        // Input contains the BASE64 secret (simulating a file with encoded
+        // secret)
+        let input_clean = "Value: dGVzdA==";
+        let expected_clean = "Value: REDACTED";
+
+        filter_cmd()
+            .arg("clean")
+            .arg("--config")
+            .arg(&config_path)
+            .write_stdin(input_clean)
+            .assert()
+            .success()
+            .stdout(diff(expected_clean));
+
+        // Input contains the PLACEHOLDER
+        let input_smudge = "Value: REDACTED";
+        let expected_smudge = "Value: dGVzdA==";
+
+        filter_cmd()
+            .arg("smudge")
+            .arg("--config")
+            .arg(&config_path)
+            .write_stdin(input_smudge)
+            .assert()
+            .success()
+            .stdout(diff(expected_smudge));
+    }
+
+    #[test]
+    fn test_encoding_hex_clean_and_smudge() {
+        // "test" in hex is "74657374"
+        let (_fd, config_path) = create_config(
+            r#"
+        [[entry]]
+        placeholder = "KEY"
+        secret = "test"
+        encoding = "hex"
+        "#,
+        );
+
+        // CLEAN: Hex -> Placeholder
+        let input_clean = "Key=74657374";
+        let expected_clean = "Key=KEY";
+
+        filter_cmd()
+            .arg("clean")
+            .arg("--config")
+            .arg(&config_path)
+            .write_stdin(input_clean)
+            .assert()
+            .success()
+            .stdout(diff(expected_clean));
+
+        // SMUDGE: Placeholder -> Hex
+        let input_smudge = "Key=KEY";
+        let expected_smudge = "Key=74657374";
+
+        filter_cmd()
+            .arg("smudge")
+            .arg("--config")
+            .arg(&config_path)
+            .write_stdin(input_smudge)
+            .assert()
+            .success()
+            .stdout(diff(expected_smudge));
+    }
+
+    #[test]
+    fn test_invalid_encoding_errors() {
+        let (_fd, config_path) = create_config(
+            r#"
+        [[entry]]
+        placeholder = "X"
+        secret = "y"
+        encoding = "rot13"
+        "#,
+        );
+
+        filter_cmd()
+            .arg("clean")
+            .arg("--config")
+            .arg(&config_path)
+            .write_stdin("data")
+            .assert()
+            .failure()
+            .stderr(contains("Unknown encoding: rot13"));
+    }
+
+    #[test]
+    fn test_mixed_encodings() {
+        let (_fd, config_path) = create_config(
+            r#"
+        [[entry]]
+        placeholder = "B64"
+        secret = "foo" # b64: Zm9v
+        encoding = "base64"
+
+        [[entry]]
+        placeholder = "HEX"
+        secret = "bar" # hex: 626172
+        encoding = "hex"
+
+        [[entry]]
+        placeholder = "PLAIN"
+        secret = "baz"
+        encoding = "none"
+        "#,
+        );
+
+        // Clean: All secrets (encoded or plain) -> Placeholders
+        let input = "Zm9v | 626172 | baz";
+        let expected = "B64 | HEX | PLAIN";
+
+        filter_cmd()
+            .arg("clean")
+            .arg("--config")
+            .arg(&config_path)
+            .write_stdin(input)
+            .assert()
+            .success()
+            .stdout(diff(expected));
+    }
+}
