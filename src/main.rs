@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
+
 #![feature(likely_unlikely, read_buf, maybe_uninit_array_assume_init)]
 use std::{
     fs,
@@ -13,6 +16,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use tracing::{debug, info, level_filters::LevelFilter};
+
+// SAFETY:
+// uget! indexing with Aho-Corasick provided indices is safe
+macro_rules! uget {
+    ($slice:expr, $idx:expr) => {
+        unsafe { $slice.get_unchecked($idx) }
+    };
+}
 
 #[derive(Parser)]
 #[command(name = "sefi")]
@@ -115,11 +126,11 @@ impl<W: Write> StreamReplacer<'_, W> {
                 }
                 Action::Skip => {
                     // Boundary check failed: write everything (prefix + original match)
-                    self.writer.write_all(&chunk[last_idx..mat.end()])?;
+                    self.writer.write_all(uget!(chunk, last_idx..mat.end()))?;
                 }
                 Action::Replace(idx) => {
                     // Boundary check passed: write prefix + replacement
-                    self.writer.write_all(&chunk[last_idx..mat.start()])?;
+                    self.writer.write_all(uget!(chunk, last_idx..mat.start()))?;
                     self.perform_replacement(idx)?;
                 }
             }
@@ -128,13 +139,16 @@ impl<W: Write> StreamReplacer<'_, W> {
         }
 
         // Write remaining tail
+        // SAFETY:
+        // Invariant: limit is derived from chunk.len() (it's <= chunk.len())
+        // last_idx is <= limit because of the loop condition
         if last_idx < limit {
-            self.writer.write_all(&chunk[last_idx..limit])?;
+            self.writer.write_all(uget!(chunk, last_idx..limit))?;
         }
 
         // Save state for next chunk
         if limit > 0 {
-            self.last_byte = Some(chunk[limit - 1]);
+            self.last_byte = Some(*uget!(chunk, limit - 1));
         }
 
         Ok(limit)
@@ -146,13 +160,13 @@ impl<W: Write> StreamReplacer<'_, W> {
         let p_idx = mat.pattern().as_usize();
 
         // If this pattern doesn't require boundaries, we always replace
-        if !self.boundaries[p_idx] {
+        if !*uget!(self.boundaries, p_idx) {
             return Action::Replace(p_idx);
         }
 
         // Check Left Boundary
         let left_is_word = if mat.start() > 0 {
-            Self::is_word_char(chunk[mat.start() - 1])
+            Self::is_word_char(*uget!(chunk, mat.start() - 1))
         } else {
             // Check the last byte from the previous chunk
             self.last_byte.is_some_and(Self::is_word_char)
@@ -170,7 +184,7 @@ impl<W: Write> StreamReplacer<'_, W> {
             }
             // If EOF, the end of the stream is implicitly a non-word
             // char
-        } else if Self::is_word_char(chunk[mat.end()]) {
+        } else if Self::is_word_char(*uget!(chunk, mat.end())) {
             return Action::Skip;
         }
 
@@ -178,8 +192,8 @@ impl<W: Write> StreamReplacer<'_, W> {
     }
 
     fn perform_replacement(&mut self, idx: usize) -> Result<()> {
-        let matched = &self.patterns[idx];
-        let replacement = &self.replacements[idx];
+        let matched = uget!(self.patterns, idx);
+        let replacement = uget!(self.replacements, idx);
 
         if let Some(path) = &self.path {
             info!(

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
+
 use std::{
     fs::File,
     io::{Seek, Write},

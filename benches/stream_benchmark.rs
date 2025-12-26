@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
+
 #![feature(test)]
 extern crate test;
 
