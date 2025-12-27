@@ -1,0 +1,33 @@
+name: Rust
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+    - name: Install rust
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: clippy,rustfmt
+    - run: cargo clippy -- -Dwarnings
+    - run: cargo fmt --all --check
+    - run: cargo test --tests
+
+  spaces-check:
+    name: Whitespace check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Spaces check
+        run: git diff-tree --check $(git hash-object -t tree /dev/null) HEAD -- . ':(exclude)tests/testdata'

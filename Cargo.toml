@@ -2,7 +2,7 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "sefi"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["zenofile", "zenofile <zenofile-sf6@unsha.re>"]
 categories = ["command-line-utilities"]
 description = "Git filter driver"
@@ -26,8 +26,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["encoding"]
+default = ["encoding", "nobounds"]
 encoding = ["dep:base64", "dep:hex"]
+nobounds = []
 
 [profile.dev]
 incremental = true

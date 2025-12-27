@@ -18,11 +18,20 @@ use serde::Deserialize;
 use tracing::{debug, info, level_filters::LevelFilter};
 
 // SAFETY:
-// uget! indexing with Aho-Corasick provided indices is safe
-macro_rules! uget {
-    ($slice:expr, $idx:expr) => {
-        unsafe { $slice.get_unchecked($idx) }
-    };
+// Value lookup dispatch:
+// Indexing into Aho-Corasick provided chunks is safe
+macro_rules! vld {
+    ($slice:expr, $idx:expr) => {{
+        #[cfg(feature = "nobounds")]
+        {
+            unsafe { $slice.get_unchecked($idx) }
+        }
+
+        #[cfg(not(feature = "nobounds"))]
+        {
+            &$slice[$idx]
+        }
+    }};
 }
 
 #[derive(Parser)]
@@ -36,6 +45,10 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Terminal colors
+    #[arg(long, value_enum, default_value_t = Color::Auto)]
+    pub color: Color,
+
     #[arg(value_enum)]
     mode: Mode,
 
@@ -45,6 +58,13 @@ struct Cli {
 
     /// Optional filename (passed by git as %f)
     pub file: Option<PathBuf>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Color {
+    Never,
+    Auto,
+    Always,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -126,11 +146,11 @@ impl<W: Write> StreamReplacer<'_, W> {
                 }
                 Action::Skip => {
                     // Boundary check failed: write everything (prefix + original match)
-                    self.writer.write_all(uget!(chunk, last_idx..mat.end()))?;
+                    self.writer.write_all(vld!(chunk, last_idx..mat.end()))?;
                 }
                 Action::Replace(idx) => {
                     // Boundary check passed: write prefix + replacement
-                    self.writer.write_all(uget!(chunk, last_idx..mat.start()))?;
+                    self.writer.write_all(vld!(chunk, last_idx..mat.start()))?;
                     self.perform_replacement(idx)?;
                 }
             }
@@ -143,12 +163,12 @@ impl<W: Write> StreamReplacer<'_, W> {
         // Invariant: limit is derived from chunk.len() (it's <= chunk.len())
         // last_idx is <= limit because of the loop condition
         if last_idx < limit {
-            self.writer.write_all(uget!(chunk, last_idx..limit))?;
+            self.writer.write_all(vld!(chunk, last_idx..limit))?;
         }
 
         // Save state for next chunk
         if limit > 0 {
-            self.last_byte = Some(*uget!(chunk, limit - 1));
+            self.last_byte = Some(*vld!(chunk, limit - 1));
         }
 
         Ok(limit)
@@ -160,13 +180,13 @@ impl<W: Write> StreamReplacer<'_, W> {
         let p_idx = mat.pattern().as_usize();
 
         // If this pattern doesn't require boundaries, we always replace
-        if !*uget!(self.boundaries, p_idx) {
+        if !*vld!(self.boundaries, p_idx) {
             return Action::Replace(p_idx);
         }
 
         // Check Left Boundary
         let left_is_word = if mat.start() > 0 {
-            Self::is_word_char(*uget!(chunk, mat.start() - 1))
+            Self::is_word_char(*vld!(chunk, mat.start() - 1))
         } else {
             // Check the last byte from the previous chunk
             self.last_byte.is_some_and(Self::is_word_char)
@@ -184,7 +204,7 @@ impl<W: Write> StreamReplacer<'_, W> {
             }
             // If EOF, the end of the stream is implicitly a non-word
             // char
-        } else if Self::is_word_char(*uget!(chunk, mat.end())) {
+        } else if Self::is_word_char(*vld!(chunk, mat.end())) {
             return Action::Skip;
         }
 
@@ -192,8 +212,8 @@ impl<W: Write> StreamReplacer<'_, W> {
     }
 
     fn perform_replacement(&mut self, idx: usize) -> Result<()> {
-        let matched = uget!(self.patterns, idx);
-        let replacement = uget!(self.replacements, idx);
+        let matched = vld!(self.patterns, idx);
+        let replacement = vld!(self.replacements, idx);
 
         if let Some(path) = &self.path {
             info!(
@@ -234,14 +254,19 @@ fn main() -> Result<()> {
             }
         };
 
-        let use_ansi = io::IsTerminal::is_terminal(&io::stdout());
+        let use_colors = match cli.color {
+            Color::Always => true,
+            Color::Never => false,
+            Color::Auto => io::IsTerminal::is_terminal(&io::stdout()),
+        };
+
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env()
                     .add_directive(level_filter.into()),
             )
             .with_writer(io::stderr)
-            .with_ansi(use_ansi)
+            .with_ansi(use_colors)
             .init();
     }
 
@@ -377,9 +402,9 @@ fn main() -> Result<()> {
     }
 
     if replacer.count > 0 {
-        info!(mode = ?cli.mode, count = replacer.count, "Replaced secrets in stream");
+        info!(mode = ?cli.mode, path = ?replacer.path, count = replacer.count,  "Replaced secrets in stream");
     } else {
-        info!("No secrets found to replace.");
+        info!(mode = ?cli.mode, path = ?replacer.path, "No secrets found to replace.");
     }
 
     Ok(())
