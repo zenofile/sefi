@@ -2,7 +2,6 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "sefi"
-version = "0.3.1"
 authors = ["zenofile", "zenofile <zenofile-sf6@unsha.re>"]
 categories = ["command-line-utilities"]
 description = "Git filter driver"
@@ -13,6 +12,7 @@ publish = false
 readme = "README.md"
 repository = "https://github.com/zenofile/sefi.git"
 rust-version = "1.94"
+version = "0.3.2"
 
 [dependencies]
 aho-corasick = "1.1"
